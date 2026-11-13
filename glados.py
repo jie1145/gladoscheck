@@ -58,14 +58,14 @@ def load_accounts():
         # name 字段可选，未提供时自动命名为 "账号 {idx}"
         if not a.get("name"):
             a["name"] = f"账号 {idx}"
-        # 支持整段 cookie 或分开的字段
+        # 支持整段 cookie 或分开的字段（兼容下划线和冒号）
         has_full_cookie = bool(a.get("cookie"))
-        has_koa = bool(a.get("koa_sess") and a.get("koa_sess_sig"))
-        has_gld = bool(a.get("gld_sess"))
+        has_koa = bool((a.get("koa_sess") or a.get("koa:sess")) and (a.get("koa_sess_sig") or a.get("koa:sess.sig")))
+        has_gld = bool(a.get("gld_sess") or a.get("gld:sess") or a.get("gld_accts") or a.get("gld:accts"))
         if not (has_full_cookie or has_koa or has_gld):
             raise RuntimeError(
                 f"Account #{idx} ({a.get('name')}) 缺少 Cookie。\n"
-                "可直接提供完整的 'cookie' 字符串，或分别提供 'gld_sess', 'gld_sess_sig', 'koa_sess', 'koa_sess_sig'。"
+                "可直接提供完整的 'cookie' 字符串，或分别提供 'gld_sess' (或 'gld:sess') 等字段。"
             )
 
     return accounts, source
@@ -152,20 +152,21 @@ class GLaDOS:
                     self.s.cookies.set(k.strip(), v.strip())
             return
 
-        # 2. 字段式注入
+        # 2. 字段式注入（同时兼容带冒号和下划线的字段名）
+        mapping = {
+            "gld:accts": ["gld:accts", "gld_accts"],
+            "gld:accts.sig": ["gld:accts.sig", "gld_accts_sig", "gld:accts_sig"],
+            "gld:sess": ["gld:sess", "gld_sess"],
+            "gld:sess.sig": ["gld:sess.sig", "gld_sess_sig", "gld:sess_sig"],
+            "koa:sess": ["koa:sess", "koa_sess"],
+            "koa:sess.sig": ["koa:sess.sig", "koa_sess_sig", "koa:sess_sig"],
+        }
         cookies = {}
-        if acc.get("gld_accts"):
-            cookies["gld:accts"] = acc["gld_accts"]
-        if acc.get("gld_accts_sig"):
-            cookies["gld:accts.sig"] = acc["gld_accts_sig"]
-        if acc.get("gld_sess"):
-            cookies["gld:sess"] = acc["gld_sess"]
-        if acc.get("gld_sess_sig"):
-            cookies["gld:sess.sig"] = acc["gld_sess_sig"]
-        if acc.get("koa_sess"):
-            cookies["koa:sess"] = acc["koa_sess"]
-        if acc.get("koa_sess_sig"):
-            cookies["koa:sess.sig"] = acc["koa_sess_sig"]
+        for cookie_name, keys in mapping.items():
+            for k in keys:
+                if acc.get(k):
+                    cookies[cookie_name] = acc[k]
+                    break
 
         self.s.cookies.update(cookies)
 
