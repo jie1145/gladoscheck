@@ -154,6 +154,10 @@ class GLaDOS:
 
         # 2. 字段式注入
         cookies = {}
+        if acc.get("gld_accts"):
+            cookies["gld:accts"] = acc["gld_accts"]
+        if acc.get("gld_accts_sig"):
+            cookies["gld:accts.sig"] = acc["gld_accts_sig"]
         if acc.get("gld_sess"):
             cookies["gld:sess"] = acc["gld_sess"]
         if acc.get("gld_sess_sig"):
