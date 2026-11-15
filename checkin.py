@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 import json
 import os
+import re
 import sys
 import time
 import requests
@@ -21,6 +22,24 @@ if sys.platform.startswith("win"):
 DEBUG = False
 ACCOUNTS_LOCAL = Path(__file__).with_name("accounts.local.json")
 ACCOUNTS_FILE = Path(__file__).with_name("accounts.json")
+
+
+def redact_email(value):
+    return re.sub(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[邮箱已隐藏]", str(value))
+
+
+def checkin_outcome(response):
+    """Only an explicit server success counts; 'not logged in' is not a repeat."""
+    if not isinstance(response, dict) or type(response.get("code")) is not int or response["code"] != 0:
+        return "失败"
+    return "已签到" if response.get("repeated") is True else "成功"
+
+
+def write_summary(report):
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        with open(summary_path, "a", encoding="utf-8") as summary:
+            summary.write("## GLaDOS 签到结果\n\n```text\n" + redact_email(report).replace("```", "'''") + "\n```\n")
 
 def load_accounts():
     """
@@ -126,7 +145,7 @@ class GLaDOS:
             total=5,
             backoff_factor=1,
             status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "POST"],
+            allowed_methods=["GET"],
         )
         adapter = HTTPAdapter(max_retries=retry)
         self.s.mount("https://", adapter)
@@ -183,23 +202,32 @@ class GLaDOS:
         try:
             data = r.json()
         except Exception:
-            return None, f"响应解析失败: {r.text[:100]}"
+            return None, "状态接口返回非 JSON 响应"
+
+        if not isinstance(data, dict):
+            return None, "状态接口返回了非预期的数据格式"
 
         if data.get("code") != 0:
-            msg = data.get("message", "status error")
+            msg = str(data.get("message") or "status error")
             if "没有权限" in msg or data.get("code") == -2:
                 msg = f"{msg} (Cookie 已过期或无效，请重新抓取填入 accounts.json)"
             return None, msg
 
-        u = data.get("data", {}) or {}
+        u = data.get("data")
+        if not isinstance(u, dict):
+            return None, "状态接口缺少账号数据，请在官网登录检查账号"
+        try:
+            left_days = int(float(u.get("leftDays", 0)))
+        except (TypeError, ValueError, OverflowError):
+            return None, "状态接口的剩余天数格式无法识别"
         if DEBUG:
-            safe_keys = ["email", "vip", "days", "leftDays", "traffic", "cakeCount", "site", "expired", "system_date"]
+            safe_keys = ["vip", "days", "leftDays", "traffic", "cakeCount", "site", "expired", "system_date"]
             print("调试返回(脱敏)：", json.dumps({k: u.get(k) for k in safe_keys}, ensure_ascii=False, indent=2))
 
         return {
             "email": u.get("email"),
             "vip": u.get("vip"),
-            "leftDays": int(float(u.get("leftDays", 0))),
+            "leftDays": left_days,
             "days": u.get("days"),
             "traffic": u.get("traffic"),
             "cakeCount": u.get("cakeCount"),
@@ -207,10 +235,29 @@ class GLaDOS:
 
     def checkin(self):
         try:
-            # 先 GET 页面（有些站依赖初始化）
-            self.s.get("https://glados.cloud/console/checkin", timeout=30)
+            # 当前官网先获取 nonce，再由浏览器完成 proof 和 Turnstile。
+            # requests 不能完成这个流程；不能把缺失验证的 POST 当作可重试错误。
+            challenge_response = self.s.get("https://glados.cloud/api/user/checkin/challenge", timeout=30)
+            if challenge_response.status_code != 404:
+                if challenge_response.status_code != 200:
+                    return {"code": -1, "message": f"获取签到验证要求失败：HTTP {challenge_response.status_code}"}
+                try:
+                    challenge = challenge_response.json()
+                except ValueError:
+                    return {"code": -1, "message": "签到验证接口返回非 JSON 响应，请使用官网检查登录状态"}
+                if not isinstance(challenge, dict) or type(challenge.get("code")) is not int:
+                    return {"code": -1, "message": "签到验证接口返回了非预期的数据格式"}
+                if challenge["code"] != 0:
+                    return {"code": challenge["code"], "message": challenge.get("message") or "无法获取签到验证，请在官网登录检查账号"}
+                if challenge.get("nonce") or challenge.get("turnstile"):
+                    return {
+                        "code": -3,
+                        "reason": "browser-required",
+                        "message": "网站要求浏览器挑战验证，纯 requests 云端签到不支持。请在本机运行 python browser_checkin.py，或在官网完成签到；刷新 Cookie 不能替代此次验证。",
+                    }
+                return {"code": -1, "message": "签到验证要求无法识别，请通过官网签到"}
 
-            # 关键：按抓包 payload
+            # 仅兼容没有挑战接口的旧版服务，不尝试伪造或重放验证结果。
             url = "https://glados.cloud/api/user/checkin"
             r = self.s.post(url, json={"token": "glados.cloud"}, timeout=30)
         except requests.RequestException as e:
@@ -219,17 +266,26 @@ class GLaDOS:
         if r.status_code != 200:
             return {"code": -1, "message": f"HTTP {r.status_code}"}
         try:
-            return r.json()
+            result = r.json()
+            if not isinstance(result, dict):
+                return {"code": -1, "message": "签到接口返回了非预期的数据格式"}
+            return result
         except Exception:
-            return {"code": -1, "message": f"响应解析失败: {r.text[:100]}"}
+            return {"code": -1, "message": "签到接口返回非 JSON 响应"}
 
 def main():
-    accounts, source = load_accounts()
+    try:
+        accounts, source = load_accounts()
+    except RuntimeError as error:
+        report = "配置错误：" + redact_email(error)
+        print(report)
+        write_summary(report)
+        return 2
     print(f"Loaded {len(accounts)} account(s) from {source}")
 
     results = []
     for i, acc in enumerate(accounts, 1):
-        name = acc["name"]
+        name = redact_email(acc["name"])
         print(f"\n===== 账号 {i}: {name} =====")
 
         g = GLaDOS()
@@ -237,30 +293,29 @@ def main():
 
         st, err = g.get_status()
         if err:
+            err = redact_email(err)
             print("❌ 获取状态失败：", err)
             results.append((name, "失败", err, None, None, None))
             continue
 
         print("账号状态详情：")
-        print(f"  邮箱: {st['email']}")
+        print("  登录状态: 有效（邮箱不写入日志）")
         print(f"  VIP等级: {st['vip']}")
         print(f"  剩余天数: {st['leftDays']}")
         print(f"  已用流量: {format_traffic(st.get('traffic'))}")
         print(f"  Cake数: {st.get('cakeCount', 0)}")
 
         res = g.checkin()
-        msg = res.get("message", "Unknown")
+        msg = redact_email(res.get("message", "Unknown"))
         points_today = res.get("points")
 
-        msg_lower = str(msg).lower()
-        is_repeat = any(k in msg_lower for k in ("repeat", "return tomorrow", "already", "logged"))
+        outcome = checkin_outcome(res)
+        display_name = name
 
-        display_name = f"{name} ({st['email']})" if st.get('email') and st['email'] not in name else name
-
-        if res.get("code") == 0:
+        if outcome == "成功":
             print(f"✅ 签到成功：{msg}，获得点数：{points_today}")
             results.append((display_name, "成功", msg, points_today, st["leftDays"], st.get("traffic")))
-        elif is_repeat:
+        elif outcome == "已签到":
             print("ℹ️ 今日已签到：", msg)
             results.append((display_name, "已签到", msg, points_today, st["leftDays"], st.get("traffic")))
         else:
@@ -286,7 +341,9 @@ def main():
         report += "\n"
 
     print("\n--- 汇总 ---\n" + report)
+    write_summary(report)
     notify("GLaDOS 签到报告", report)
+    return 0 if ok == total else 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
