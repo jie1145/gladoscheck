@@ -6,15 +6,18 @@ on:
     - cron: '30 0 * * *'
   workflow_dispatch: # 支持在 GitHub 页面上手动点击测试
 
+permissions:
+  contents: read
+
 jobs:
   checkin:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
           cache: 'pip'
