@@ -1,5 +1,20 @@
 # 配置说明
 
+## 当前官网需要浏览器验证
+
+2026-11-15 核查：当前签到请求需要一次性挑战和 Cloudflare 验证，Cookie 只能用于会话登录，不能替代该流程。GitHub Actions 的 requests 模式会提示 `browser-required` 并失败退出。
+
+本地正常网页模式：
+
+```bash
+python -m pip install -r requirements-browser.txt
+python browser_checkin.py --login --keep-open
+```
+
+本人在官网登录并按需完成验证；工具只点击原有签到按钮并检查接口结果。专用资料默认保存在已被 Git 忽略的 `.browser-profile/`，不需要复制 Cookie 到配置文件。真实账号是否成功仍需实测。
+
+下面的 Cookie 配置用于旧版 API 模式及状态诊断。
+
 ---
 
 ## 核心配置三步法
