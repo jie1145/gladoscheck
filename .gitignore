@@ -1,6 +1,7 @@
 # 本地真实 Cookie 配置文件（绝对不提交到远程仓库）
 accounts.json
 accounts.local.json
+.browser-profile/
 
 # Python
 __pycache__/
